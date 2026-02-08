@@ -1,644 +1,334 @@
 // ==UserScript==
-// @name         XPLAY.GG Store Enhance
-// @version      2.1.0
-// @description  Enhances the xplay.gg store with additional features!
+// @name         XPLAY.GG Store Enhance (EUR + Colored Prices)
+// @version      2.1.5
+// @description  Steam prices in EUR, correct calculation, colored UI, stable queue
 // @author       Treasure
 // @match        https://xplay.gg/*
-// @icon         https://xplay.gg/static/favicons/favicon-96x96.png
 // @grant        window.onurlchange
 // @grant        GM_xmlhttpRequest
 // @grant        GM_addStyle
 // @connect      steamcommunity.com
-// @updateURL    https://github.com/Tr345ure/xplay-store-enhance/raw/main/xplay-store-enhance.user.js
-// @downloadURL  https://github.com/Tr345ure/xplay-store-enhance/raw/main/xplay-store-enhance.user.js
 // @noframes
 // ==/UserScript==
 
 (function() {
     'use strict';
 
-    // Add event listeners for initial load of page and every page change afterwards
+    GM_addStyle(`
+        .xse_addon_button{
+            display:inline-block;
+            padding:0.5em 0.8em;
+            margin:1em 0.7em 0 0;
+            color:white;
+            background-color:#282d32;
+            border-radius:1em;
+            text-align:center;
+            position:relative;
+            z-index:9999;
+            pointer-events:auto;
+        }
+        .xse_addon_button a{color:#6ecbff;text-decoration:none}
+        .xse_addon_button:hover{cursor:pointer;opacity:.85}
+        .xse_addon_priceTag{
+            display:inline;
+            position:relative;
+            z-index:9999;
+            color:#7CFC9A;
+        }
+        .xse_price_error{
+            color:#ff7b7b;
+        }
+        .xse_addon_loadAll{
+            color:white;
+            position:fixed;
+            bottom:4em;
+            right:2em;
+            z-index:10000;
+        }
+    `);
+
     window.addEventListener("load", siteLoadHandler, { once: true });
     window.addEventListener("newurl", siteLoadHandler);
     window.addEventListener("pagechange", siteLoadHandler);
 
-    // Check for browser support of Tampermonkey's window.onurlchange
-    // If compatible, use the native implementation. If not, go to fallback mode
     if (window.onurlchange === null) {
-        window.addEventListener("urlchange", (event) => {
-            window.dispatchEvent(new CustomEvent("newurl", {
-                detail: {
-                    url: event.url
-                }
-            }));
+        window.addEventListener("urlchange", e => {
+            window.dispatchEvent(new CustomEvent("newurl",{detail:{url:e.url}}));
         });
-    } else { // Use fallback mode: Check every 200ms if current URL is different from the last one
-        console.info("XPLAY.GG Store Enhance:\nOnUrlChange is NOT supported, continuing in fallback mode");
-        let oldURL = window.location.href;
-        let newURL;
+    } else {
+        let oldURL = location.href;
         setInterval(() => {
-            newURL = window.location.href;
-            if(newURL !== oldURL){
-                window.dispatchEvent(new CustomEvent("newurl", {
-                    detail: {
-                        url: newURL
-                    }
-                }));
-                oldURL = newURL;
+            if (location.href !== oldURL) {
+                oldURL = location.href;
+                window.dispatchEvent(new CustomEvent("newurl",{detail:{url:oldURL}}));
             }
         }, 200);
     }
 
-    // Make resolve and reject for the showcase search public
-    let retryResolve, retryReject;
+    const mainObserver = new MutationObserver(() => {
+        clearTimeout(window.__xseSpaTimer);
+        window.__xseSpaTimer = setTimeout(() => {
+            siteLoadHandler({ type: "pagechange", detail: { url: location.href } });
+        }, 300);
+    });
 
-    const emptyShowcaseMsgs = ["Showcase is empty","Cellule vide","Zelle leer","A bemutató üres","Komórka pusta","Ячейка пуста","El escaparate está vacío"];
+    window.addEventListener("load", () => {
+        const main = document.querySelector("main");
+        if (main) mainObserver.observe(main, { childList: true, subtree: true });
+    });
 
-    // Add CSS for buttons and notifications
-    GM_addStyle(
-        ".xse_addon_button {" +
-        "display: inline-block; padding: 0.5em 0.8em 0.5em 0.8em; margin: 1em 0.7em 0 0;" +
-        "color: white; background-color: #282d32; border-radius: 1em; text-align: center;" +
-        "}" +
+    const emptyShowcaseMsgs = [
+        "Showcase is empty","Cellule vide","Zelle leer","A bemutató üres",
+        "Komórka pusta","Ячейка пуusta","El escaparate está vacío"
+    ];
 
-        ".xse_addon_button a { color: white; text-decoration: none; }" +
-        ".xse_addon_button:hover { cursor: pointer; color: #ddd; }" +
-        ".xse_addon_button a:hover { cursor: pointer; color: #ddd; }" +
-        ".xse_addon_priceTag { display: inline; }" +
-        ".xse_addon_loadAll { color: white; position: fixed; bottom: 4em; right: 2em; }" +
-
-        ".xse_addon_notifContainer {" +
-        "position: absolute; bottom: 2em; right: 3.5em; background-color: #282d32;" +
-        "border-radius: 0.5em; width: 30em; min-height: 6em" +
-        "}" +
-
-        ".xse_addon_notifTime {" +
-        "position: absolute; top: 0; left: 0; width: 30em; height: 0.5em; border-radius: 5px 5px 5px 0;" +
-        "}" +
-
-        ".xse_addon_notifTitle { padding: 0; margin: 0.7em 0 0.3em 0.8em; font-size: 1.7em; color: white; }" +
-        ".xse_addon_notifMessage { padding: 0 0 1em 0; margin: 0 0 0 1em; font-size: 1.4em; color: white; }"
-    );
-
-    // Check what part of the site we're currently on
-    // Return "store" for store and auction pages, "inventory" for profile inventory page and "another" for the rest
     function checkForPageType(url){
-        const storeURLRegex = new RegExp("https:\/\/xplay\.gg\/([a-z]{2}\/)?store");
-        const inventoryURLRegex = new RegExp("https:\/\/xplay\.gg\/([a-z]{2}\/)?profile\/inventory");
-        
-        if (storeURLRegex.test(url)) return "store";
-        if (inventoryURLRegex.test(url)) return "inventory";
+        if (/\/store/.test(url)) return "store";
+        if (/\/profile\/inventory/.test(url)) return "inventory";
         return "another";
     }
 
-    // Handle the load and newurl events and extract the current URL from them
-    // Call different functions depending on if it's a store page or not
-    function siteLoadHandler(event){
-        const loadDelay = 400;
-        let currentUrl;
-        switch(event.type){
-            case "load":
-                currentUrl = event.target.URL;
-                break;
-            case "newurl":
-                currentUrl = event.detail.url;
-                break;
-            case "pagechange":
-                retryReject("Page change event, stop retrying");
-                currentUrl = event.detail.url;
-                break;
-            default:
-                console.error("XPLAY.GG Store Enhance:\nUnknown event type was called in the site load handler");
-        }
+    function siteLoadHandler(e){
+        const delay = 400;
+        const url = e.detail?.url || e.target?.URL || location.href;
 
-        switch(checkForPageType(currentUrl)){
+        switch (checkForPageType(url)){
             case "store":
-                setTimeout(setButtonListeners, loadDelay); // Set onclick event listeners for all relevant buttons
-                setTimeout(execute, loadDelay, getStoreElements, getStoreShowcaseClasses, getStoreFullShowcases);
+                setTimeout(setButtonListeners, delay);
+                setTimeout(execute, delay, getStoreElements, getStoreShowcaseClasses, getStoreFullShowcases);
                 break;
             case "inventory":
-                setTimeout(execute, loadDelay, getInventoryElements, getInventoryShowcaseClasses, getInventoryFullShowcases);
+                setTimeout(execute, delay, getInventoryElements, getInventoryShowcaseClasses, getInventoryFullShowcases);
                 break;
             default:
-                setTimeout(removeLoadAllButton, loadDelay);
-                break;
+                setTimeout(removeLoadAllButton, delay);
         }
     }
 
+    function execute(getElements, getClasses, getFull){
+        let elements, classes;
 
-    // When a store/inventory page is found, get skins and add buttons to them
-    function execute(getElementsFunc, getShowcaseClassesFunc, getFullShowcasesFunc){
-        let elements;
-        let showcaseClasses;
-
-        // If only empty showcases have been found, retry for 5 seconds
-        // or until showcases with skins have been found
-        const showcasesPopulated = new Promise((resolve, reject) => {
-            retryResolve = resolve;
-            retryReject = reject;
-            const retryDelay = 200;
-            function retry(retries = 0){
-                if(retries >= 25){
-                    return reject("Maximum amount of retries reached");
-                } else {
-                    elements = getElementsFunc();
-                    showcaseClasses = getShowcaseClassesFunc(elements);
-
-                    if(showcaseClasses[0][1] === 0){
-                        setTimeout(() => { retry(++retries) }, retryDelay);
-                    } else {
-                        return resolve("Skins found");
-                    }
-                }
+        const populated = new Promise((resolve, reject)=>{
+            function retry(i=0){
+                if(i>=25) return reject();
+                elements = getElements();
+                classes = getClasses(elements);
+                if(classes[0][1]===0) return setTimeout(()=>retry(i+1),200);
+                resolve();
             }
             retry();
         });
 
-        // Once full showcases have been found:
-        showcasesPopulated.then(() => {
-            // Push all full showcases to an array
-            let fullShowcases = getFullShowcasesFunc(elements, showcaseClasses[0][0]);
-            // Get the item attributes for all skins from full showcases
-            let itemAttributes = [];
-            fullShowcases.forEach((element) => {
-                itemAttributes.push(getItemAttributes(element));
+        populated.then(()=>{
+            const full = getFull(elements, classes[0][0]);
+            const attrs = full.map(getItemAttributes);
+            attrs.forEach(a=>{
+                setNameColors(a);
+                addShowcaseButtons(a);
             });
-            // Change name color (i.e. for StatTrak) and add buttons
-            itemAttributes.forEach((element) => {
-                setNameColors(element);
-                addShowcaseButtons(element);
-            });
-            // Add the "load all skin prices" button to the page
-            addLoadAllButton(fullShowcases);
-        }).catch(() => {
-            // If the promise is rejected, do nothing.
-            // The promise can be rejected for the following reasons:
-            // 1) The requested page has been changed, no more retries needed
-            // 2) The maximum amount of retries has been reached
-            // 3) An unknown error occured during retrying.
-        });
+            addLoadAllButton(full);
+        }).catch(()=>{});
     }
 
-    // Get all relevant DOM elements needed to extract the skin showcases
     function getStoreElements(){
-        let elements = [];
-        const elementAmountRequired = 16;
-
-        try {
-            // Get all elements that are skin showcases or at least pretend to be
-            let elesStore = Array.from(document.getElementsByTagName("main")[0].children[0].children[2].children[0].children[3].children);
-            let elesAuction = Array.from(document.getElementsByTagName("main")[0].children[0].children[2].children[0].children[4].children);
-
-            // If not enough elements are in either element array, return an empty array, thus abort function
-            if(elesStore.length < elementAmountRequired && elesAuction.length < elementAmountRequired){
-                return [];
-            }
-
-            // Select which elements should be used depending on store or auction page
-            if (elesStore.length > elesAuction.length) {
-                elements = elesStore;
-            } else {
-                elements = elesAuction;
-                // If it's an auction page, move auction timers up a bit
-                moveAuctionTimers(elements);
-            }
-
-            return elements;
-        } catch (error) {
-            console.error("XPLAY.GG Store Enhance:\nError during store element collection", error);
-        }
+        try{
+            const m=document.getElementsByTagName("main")[0];
+            const s=Array.from(m.children[0].children[2].children[0].children[3].children);
+            const a=Array.from(m.children[0].children[2].children[0].children[4].children);
+            if(s.length>=a.length) return s;
+            moveAuctionTimers(a);
+            return a;
+        }catch{return[];}
     }
 
-    // Get all relevant DOM elements needed to extract the skin showcases
     function getInventoryElements(){
-        const elementAmountRequired = 4;
-
-        try {
-            // Get all elements that are skin showcases or at least pretend to be
-            let elements = Array.from(document.getElementsByTagName("main")[0].children[0].children[1].children[2].children[0].children[0].children[0].children[1].children[0].children);
-            
-            // If not enough elements in element array, abort function
-            if (elements.length < elementAmountRequired) return [];
-            
-            return elements;
-        } catch (error) {
-            console.error("XPLAY.GG Store Enhance:\nError during inventory element collection", error);
-        }
+        try{
+            return Array.from(document.getElementsByTagName("main")[0]
+                .children[0].children[1].children[2].children[0]
+                .children[0].children[0].children[1].children[0].children);
+        }catch{return[];}
     }
 
-    // Set event listeners for store navigation buttons that don't trigger a URL change
-    function setButtonListeners(){
-        try {
-            // Get option button field, store/auction selector, pagination and skin search field
-            let optionsButtons = document.getElementsByTagName("main")[0].children[0].children[2].children[0].children[2];
-            let storeSelectionButtons = document.getElementsByTagName("main")[0].children[0].children[2].children[0].children[1].children[0];
-            let paginationButtons = document.getElementsByTagName("main")[0].children[0].children[2].children[0].lastChild.children[1].children[0];
-            let skinSearchField = document.getElementsByTagName("main")[0].children[0].children[2].children[0].children[2].children[1].children[0].children[1].children[1];
-
-            // Specify handler for onclick/keydown events from the elements above
-            // This is done so the event listeners can be removed on page change and not fire multiple events
-            let buttonHandler = function(){
-                [optionsButtons, storeSelectionButtons, paginationButtons].forEach((ele) => ele.removeEventListener("click", buttonHandler));
-                skinSearchField.removeEventListener("keydown", buttonHandler);
-                window.dispatchEvent(new CustomEvent("pagechange", {
-                    detail: {
-                        url: window.location.href
-                    }
-                }));
-            };
-
-            // Add EventListeners to option button field, store/auction selector, pagination and skin search field
-            optionsButtons.addEventListener("click", buttonHandler);
-            storeSelectionButtons.addEventListener("click", buttonHandler);
-            paginationButtons.addEventListener("click", buttonHandler);
-            skinSearchField.addEventListener("keydown", buttonHandler);
-        } catch (error) {
-            console.error("XPLAY.GG Store Enhance:\nError while setting click listeners for buttons", error);
-        }
-    }
-
-    // Get class names of full, empty and other showcases because they are generated dynamically
     function getStoreShowcaseClasses(elements){
-        const reliableShowcasesRequired = 20;
-
-        // Arrays for collecting the amount and class names of full, empty and other (i.e. ads) showcases
-        // [className, amountOfOccurences];
-        let fullShowcases = ["", 0];
-        let emptyShowcases = ["", 0];
-        let otherShowcases = ["", 0];
-
-        // Check how many showcases of which sort are there and determine their class names
-        elements.forEach((ele) => {
-            if(ele.children.length >= 6){
-                fullShowcases[0] = ele.className;
-                fullShowcases[1]++;
-            } else if(emptyShowcaseMsgs.includes(ele.innerText)){
-                emptyShowcases[0] = ele.className;
-                emptyShowcases[1]++;
-            } else {
-                otherShowcases[0] = ele.className;
-                otherShowcases[1]++;
-            }
-        })
-
-        // If there are less than 20 elements that are full or empty showcases, return an empty array, thus abort function
-        if(fullShowcases[1] + emptyShowcases[1] < reliableShowcasesRequired){
-            return [["", 0],["", 0],["", 0]];
-        }
-
-        return [fullShowcases, emptyShowcases, otherShowcases];
+        let full=["",0], empty=["",0];
+        elements.forEach(e=>{
+            if(e.children.length>=6){full=[e.className,full[1]+1];}
+            else if(emptyShowcaseMsgs.includes(e.innerText)){empty=[e.className,empty[1]+1];}
+        });
+        return full[1]+empty[1]>=20?[full,empty]:[["",0],["",0]];
     }
 
-    // Get class names of full, empty because they are generated dynamically
     function getInventoryShowcaseClasses(elements){
-        const reliableShowcasesRequired = 4;
-
-        // Arrays for collecting the amount and class names of full, empty showcases
-        // [className, amountOfOccurences];
-        let fullShowcases = ["", 0];
-        let emptyShowcases = ["", 0];
-
-        // Check how many showcases of which sort are there and determine their class names
-        elements.forEach((ele) => {
-            if(ele.children[0].children.length >= 6){
-                fullShowcases[0] = ele.className;
-                fullShowcases[1]++;
-            } else if(emptyShowcaseMsgs.includes(ele.innerText)){
-                emptyShowcases[0] = ele.className;
-                emptyShowcases[1]++;
-            }
-        })
-
-        // If there are less than 4 elements that are full or empty showcases, return an empty array, thus abort function
-        if(fullShowcases[1] + emptyShowcases[1] < reliableShowcasesRequired){
-            return [["", 0],["", 0]];
-        }
-
-        return [fullShowcases, emptyShowcases];
+        let full=["",0], empty=["",0];
+        elements.forEach(e=>{
+            if(e.children[0]?.children.length>=6){full=[e.className,full[1]+1];}
+            else if(emptyShowcaseMsgs.includes(e.innerText)){empty=[e.className,empty[1]+1];}
+        });
+        return [full,empty];
     }
 
-    // Return an array of the DOM elements of all full showcases
-    function getStoreFullShowcases(elements, targetClass){
-        let fullShowcases = [];
-        elements.forEach((element) => {
-            if(element.className === targetClass){
-                fullShowcases.push(element);
-            }
-        })
-        return fullShowcases;
+    function getStoreFullShowcases(elements,cls){return elements.filter(e=>e.className===cls);}
+    function getInventoryFullShowcases(elements,cls){return elements.filter(e=>e.className===cls).map(e=>e.children[0]);}
+
+    function getItemAttributes(el){
+        const c=el.childNodes;
+        const typeEl=c[1].firstChild;
+        const skinEl=c[2];
+        const condEl=c[3];
+        const priceEl=c[1].lastChild;
+
+        const st=typeEl.innerText.includes("StatTrak");
+        const sv=typeEl.innerText.includes("Souvenir");
+
+        let skin=skinEl.innerText.split("\n")[0].replace(/\sPhase\s\d$/,"");
+        let txt=`${typeEl.innerText} | ${skin} (${condEl.innerText})`;
+
+        let hash=encodeURI(txt)
+            .replace("%u2122","%e2%84%a2")
+            .replace("%u2605","%e2%98%85")
+            .replace("'","%27");
+
+        return [el,st,sv,Number(priceEl.innerText),hash];
     }
 
-    // Return an array of the DOM elements of all full showcases
-    function getInventoryFullShowcases(elements, targetClass){
-        let fullShowcases = [];
-        elements.forEach((element) => {
-            if(element.className === targetClass){
-                fullShowcases.push(element.children[0]);
-            }
-        })
-        return fullShowcases;
+    function addShowcaseButtons(a){
+        if(a[0].__xseInjected) return;
+        a[0].style.height="auto";
+        a[0].append(createSteamMarketButton(a[4]));
+        a[0].append(createLoadPriceButton(a[4],a[3]));
+        a[0].__xseInjected = true;
     }
 
-    // Get item attributes:
-    // StatTrak status, Souvenir status, xcoin price, weapon type, skin name, condition
-    function getItemAttributes(element){
-        let statTrak = false;
-        let souvenir = false;
-        let price;
-
-        const children = element.childNodes;
-        const weaponTypeElement = children[1].firstChild;
-        const weaponSkinElement = children[2];
-        const weaponConditionElement = children[3];
-        const xcoinPriceElement = children[1].lastChild;
-
-        // Check if skin is StatTrak or Souvenir
-        if(weaponTypeElement.innerText.includes("StatTrak")){
-            statTrak = true;
-        }
-        if (weaponTypeElement.innerText.includes("Souvenir")){
-            souvenir = true;
-        }
-
-        // Get xcoin price of the skin
-        price = xcoinPriceElement.innerText;
-
-        return buildItemAttrArray(
-            element,
-            statTrak,
-            souvenir,
-            price,
-            weaponTypeElement.innerText,
-            weaponSkinElement.innerText,
-            weaponConditionElement.innerText
-        );
+    function createSteamMarketButton(hash){
+        const b=document.createElement("div");
+        b.className="xse_addon_button";
+        b.innerHTML=`<a href="https://steamcommunity.com/market/listings/730/${hash}" target="_blank">Steam Market ↗</a>`;
+        b.addEventListener("click",e=>e.stopPropagation());
+        return b;
     }
 
-    // Build an array from raw item attributes
-    function buildItemAttrArray(element, weaponSt, weaponSv, price, weaponType, weaponSkin, weaponCondition){
-        let text = [];
+    const queue=[]; let busy=false;
 
-        // Weapon type (i.e. "AK-47")
-        text.push(weaponType);
-        text.push(" | ");
-
-        // Skin name (i.e. "Amber Fade"), remove phase descriptors
-        let skinName = weaponSkin;
-        // Remove second line (i.e. amount of bids for auctions)
-        skinName = skinName.split("\n")[0];
-        // Remove Phase descriptors (i.e. "Phase 2")
-        const phaseRegex = /\sPhase\s\d$/;
-        skinName = skinName.replace(phaseRegex,"");
-        text.push(skinName);
-
-        // Skin condition (i.e. "Field-Tested")
-        text.push(" (");
-        text.push(weaponCondition);
-        text.push(")");
-
-        // Encode search string, replace some special chars, and finally build marketplace URL
-        //                                         TM sign for StatTrak          Star for special items             Single quote
-        //                                                 v                              v                              v
-        let returnText = encodeURI(text.join("")).replace("%u2122", "%e2%84%a2").replace("%u2605", "%e2%98%85").replace("'", "%27");
-
-        return [element, weaponSt, weaponSv, Number(price), returnText];
+    function createLoadPriceButton(hash,xcoin){
+        const b=document.createElement("div");
+        b.className="xse_addon_button";
+        b.innerText="Load Price";
+        b.addEventListener("click",e=>{
+            e.stopPropagation();
+            queue.push({hash,xcoin,b});
+            runQueue();
+        });
+        return b;
     }
 
-    // Determine the market tag for the rarity so search results can be filtered reliably
-    function getMarketStTag(searchString, weaponSt, weaponSv){
-        // Check if item is a special item (i.e. knives, gloves)
-        const isKnife = searchString.toLowerCase().includes("%e2%98%85");
-
-        if(weaponSv){
-            // Souvenir
-            return "tag_tournament";
-        }
-
-        if(weaponSt && isKnife){
-            // StatTrak AND special item
-            return "tag_unusual_strange";
-        } else if (weaponSt && !isKnife) {
-            // Just StatTrak
-            return "tag_strange";
-        } else if (!weaponSt && isKnife) {
-            // Just special item
-            return "tag_unusual";
-        } else if (!weaponSt && !isKnife) {
-            // Neither StatTrak nor special item
-            return "tag_normal";
-        } else {
-            console.error("XPLAY.GG Store Enhance:\nCouldn't get skin status tag");
-        }
-    }
-
-    // Add the "load all skin prices" button to the page
-    function addLoadAllButton(elements){
-        // Remove all previous buttons to prevent stale elements for clicks
-        removeLoadAllButton();
-
-        // Add button to page
-        let checkAllButton = document.createElement("div");
-        checkAllButton.className = "xse_addon_button xse_addon_loadAll";
-        checkAllButton.innerHTML = "Load all<br>skin prices";
-        document.body.appendChild(checkAllButton);
-
-        // Add click event listener to the page that clicks all "load price" buttons it can find
-        checkAllButton.addEventListener("click", function(){
-            elements.forEach((element) => {
-                if(element.lastChild.innerText === "Load Price") element.lastChild.click();
-            })
-            checkAllButton.remove();
+    function runQueue(){
+        if(busy||!queue.length)return;
+        busy=true;
+        const j=queue.shift();
+        fetchPrice(j).finally(()=>{
+            setTimeout(()=>{busy=false;runQueue();},700);
         });
     }
 
-    // Remove all "load all skin prices" buttons it can find from a page
-    function removeLoadAllButton(){
-        if(document.getElementsByClassName("xse_addon_loadAll").length > 0){
-            Array.from(document.getElementsByClassName("xse_addon_loadAll")).forEach((element) => {
-                element.remove();
-            });
-        }
-    }
+    function fetchPrice({hash,xcoin,b},r=0){
+        b.innerText="Loading...";
+        b.style.backgroundColor="transparent";
 
-    // Add the "steam market" and "load price" to an element
-    function addShowcaseButtons(elementAttributes){
-        // Only add the buttons if the element doesn't have them yet
-        if(elementAttributes[0].lastChild.className !== "xse_addon_button" &&
-            elementAttributes[0].lastChild.className !== "xse_addon_priceTag") {
-            // Change element height to auto to make space for the buttons
-            elementAttributes[0].style.height = "auto";
+        return new Promise(res=>{
+            GM_xmlhttpRequest({
+                method:"GET",
+                // currency=3 => EUR
+                url:`https://steamcommunity.com/market/priceoverview/?appid=730&currency=3&market_hash_name=${hash}`,
+                onload:x=>{
+                    try{
+                        const d=JSON.parse(x.responseText);
 
-            // Add "steam market" button
-            let steamMarketButton = createSteamMarketButton(elementAttributes[4]);
-            elementAttributes[0].appendChild(steamMarketButton);
-
-            // Add "load price" button
-            let loadPriceButton = createLoadPriceButton(
-                elementAttributes[4],
-                elementAttributes[3],
-                elementAttributes[1],
-                elementAttributes[2]
-            );
-            elementAttributes[0].appendChild(loadPriceButton);
-        }
-    }
-
-    // Create the "steam market" button DOM element with the proper URL
-    function createSteamMarketButton(searchString){
-        let steamMarketUrl = "https://steamcommunity.com/market/listings/730/" + searchString;
-
-        let button = document.createElement("div");
-        button.className = "xse_addon_button";
-        button.innerHTML = "<a href='" + steamMarketUrl + "' target='_blank'>Steam Market &#129133;</a>";
-        button.addEventListener("click", (event) => { event.stopPropagation(); });
-
-        return button;
-    }
-
-    // Create the "load price" button DOM element with the proper URL for API request
-    // and add a click event listener to it to fire the XHR
-    function createLoadPriceButton(searchString, price, weaponSt, weaponSv){
-        let statTrakTag = getMarketStTag(searchString, weaponSt, weaponSv);
-        // Build the XHR URL
-        let requestUrl =
-            "https://steamcommunity.com/market/search/render/?query=" +
-            searchString +
-            "&start=0&count=1&search_descriptions=0&sort_column=default&sort_dir=desc&appid=730" +
-            "&category_730_ItemSet[]=any&category_730_ProPlayer[]=any&category_730_StickerCapsule[]=any" +
-            "&category_730_TournamentTeam[]=any&category_730_Weapon[]=any&category_730_Quality[]=" +
-            statTrakTag +
-            "&norender=1";
-
-        let button = document.createElement("div");
-        button.className = "xse_addon_button";
-        button.innerHTML = "Load Price";
-
-        // Add a click event listener to the button to request the skin price
-        // from Steam once the button is clicked
-        button.addEventListener("click", function(event){
-            event.stopPropagation();
-            makeSteamRequest(requestUrl, price, button);
-        });
-
-        return button;
-    }
-
-    // Make the actual XHR to Steam and retry if necessary
-    function makeSteamRequest(url, price, button, retries = 0){
-        // Change the button to indicate that the price is loading
-        button.innerText = "Loading...";
-        button.style.backgroundColor = "transparent";
-
-        // Fire the XHR
-        GM_xmlhttpRequest({
-            method: "GET",
-            url: url,
-            onload: function(response) {
-                switch(response.status){
-                    // Received "OK" status
-                    case 200:
-                        try {
-                            let jsonResponse = JSON.parse(response.response);
-
-                            // Retry if response is empty despite code 200
-                            if(jsonResponse.total_count === 0 && retries < 3){
-                                makeSteamRequest(url, price, button, retries++);
-                                break;
-                            }
-
-                            // Once a price has been found, set the price tag
-                            setPriceTag(button, price, jsonResponse.results[0].sell_price, jsonResponse.results[0].sell_price_text)
-                        } catch(e) {
-                            // Show notification if something went wrong
-                            if(e.message === "jsonResponse.results[0] is undefined"){
-                                createNotification(0, "Skin not found", "The skin you requested the price for could not be found on the community market.");
-                            } else {
-                                createNotification(0, "Error", "An error occured while trying to get the price of the requested skin.");
-                                console.error("Error on line " + --e.lineNumber + ":\n" + e.message);
-                            }
+                        if(!d.success){
+                            b.innerText="Steam API limit";
+                            b.classList.add("xse_price_error");
+                            return res();
                         }
-                        break;
-                    // Received "Request Limit exceeded" status
-                    case 429:
-                        createNotification(0, "Rate limited", "Could not get data from Steam because you've been rate limited.");
-                        break;
-                    // Unexpected status code that's neither 200 or 429
-                    default:
-                        createNotification(0, "Unexpected Status Code", "The request to the Steam API failed with status code: " + response.status);
+
+                        if(!d.lowest_price){
+                            b.innerText="No Steam data";
+                            b.classList.add("xse_price_error");
+                            return res();
+                        }
+
+                        // Handle comma decimal locales
+                        const steamEUR=parseFloat(
+                            d.lowest_price
+                                .replace("€","")
+                                .replace(",",".")
+                                .replace(/[^\d.]/g,"")
+                        );
+
+                        const ratio=Math.max(0.01, steamEUR/1000).toFixed(2);
+
+                        const t=document.createElement("div");
+                        t.className="xse_addon_priceTag";
+                        t.innerHTML=`€${steamEUR.toFixed(2)} <small>(${ratio}/1k)</small>`;
+                        b.parentNode.append(t);
+                        b.remove();
+                        res();
+                    }catch{
+                        b.innerText="Steam error";
+                        b.classList.add("xse_price_error");
+                        res();
+                    }
+                },
+                onerror:()=>{
+                    b.innerText="Steam error";
+                    b.classList.add("xse_price_error");
+                    res();
                 }
-            }
+            });
         });
     }
 
-    // Set the price tag, format it and remove the "load price" button
-    function setPriceTag(button, xcoinPrice, steamPrice, steamPriceText){
-        let priceTag = document.createElement("div");
-        let xcoinRatio = (steamPrice / xcoinPrice * 10).toFixed(2);
-        priceTag.className = "xse_addon_priceTag";
-        priceTag.innerHTML = steamPriceText;
-        priceTag.innerHTML += " <small>(" + xcoinRatio + "&hairsp;/&hairsp;1k)</small>";
-        button.parentNode.append(priceTag);
-        button.remove();
+    function addLoadAllButton(elements){
+        removeLoadAllButton();
+        const b=document.createElement("div");
+        b.className="xse_addon_button xse_addon_loadAll";
+        b.innerHTML="Load all<br>EUR prices";
+        b.onclick=()=>{
+            elements.forEach(e=>{
+                if(e.lastChild?.innerText==="Load Price")e.lastChild.click();
+            });
+            b.remove();
+        };
+        document.body.appendChild(b);
     }
 
-    // Change name color for StatTrak and Souvenir skins
-    function setNameColors(element){
-        const weaponTypeElement = element[0].children[1].firstChild;
-
-        if(element[1]){
-            weaponTypeElement.style.color = "orangered";
-        }
-        if(element[2]){
-            weaponTypeElement.style.color = "gold";
-        }
+    function removeLoadAllButton(){
+        document.querySelectorAll(".xse_addon_loadAll").forEach(e=>e.remove());
     }
 
-    // Create a notification element with given type, title, message and duration
-    function createNotification(type, title, message, duration = 4000){
-        // Create elements needed for notification
-        let notif = document.createElement("div");
-        let notifTime = document.createElement("div");
-        let notifTitle = document.createElement("h1");
-        let notifMessage = document.createElement("p");
-
-        // Set the displayed text according to supplied arguments
-        notifTitle.innerText = title;
-        notifMessage.innerText = message;
-
-        // Set time bar color according to supplied argument
-        let typeColor;
-        if(type === 1){
-            // Green
-            typeColor = "#3d818f";
-        } else {
-            // Red
-            typeColor = "#eb5757";
-        }
-
-        // Set styles for notification elements
-        notif.className = "xse_addon_notifContainer";
-        notifTime.className = "xse_addon_notifTime";
-        notifTitle.className = "xse_addon_notifTitle";
-        notifMessage.className = "xse_addon_notifMessage";
-        notifTime.style.cssText = "background-color: " + typeColor + "; transition: width " + duration + "ms linear;";
-
-        // Append notification to the page
-        notif.appendChild(notifTime);
-        notif.appendChild(notifTitle);
-        notif.appendChild(notifMessage);
-        document.body.appendChild(notif);
-
-        // Animate time bar and remove notification after timeout
-        setTimeout(()=>{ notifTime.style.width = "0px"; }, 10);
-        setTimeout(()=>{ notif.remove(); }, duration+200);
+    function setNameColors(e){
+        const el=e[0].children[1].firstChild;
+        if(e[1])el.style.color="orangered";
+        if(e[2])el.style.color="gold";
     }
 
-    // Move auction timers up because they are positioned relatively from the bottom of the showcase
+    function setButtonListeners(){
+        try{
+            const m=document.getElementsByTagName("main")[0].children[0].children[2].children[0];
+            const btns=[m.children[2],m.children[1].children[0],m.lastChild.children[1].children[0]];
+            const search=m.children[2].children[1].children[0].children[1].children[1];
+            const h=()=>{
+                btns.forEach(b=>b.removeEventListener("click",h));
+                search.removeEventListener("keydown",h);
+                window.dispatchEvent(new CustomEvent("pagechange",{detail:{url:location.href}}));
+            };
+            btns.forEach(b=>b.addEventListener("click",h));
+            search.addEventListener("keydown",h);
+        }catch{}
+    }
+
     function moveAuctionTimers(elements){
-        elements.forEach((ele) => {
-            if(ele.children[5] !== undefined){
-                ele.children[5].style = 'bottom: 5em;';
-            }
+        elements.forEach(e=>{
+            if(e.children[5])e.children[5].style='bottom:5em;';
         });
     }
 })();
+
