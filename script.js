@@ -256,14 +256,15 @@
                         }
 
                         // Handle comma decimal locales
-                        const steamEUR=parseFloat(
+                        const steamEUR = parseFloat(
                             d.lowest_price
-                                .replace("€","")
-                                .replace(",",".")
-                                .replace(/[^\d.]/g,"")
+                            .replace("€","")
+                            .replace(",",".")
+                            .replace(/[^\d.]/g,"")
                         );
 
-                        const ratio=Math.max(0.01, steamEUR/1000).toFixed(2);
+                        const steamCents = Math.round(steamEUR * 100);
+                        const ratio = ((steamCents / xcoin) * 10).toFixed(2);
 
                         const t=document.createElement("div");
                         t.className="xse_addon_priceTag";
@@ -331,4 +332,3 @@
         });
     }
 })();
-
